@@ -6,7 +6,7 @@ from PIL import Image
 import io, os, tempfile
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http://slimmypdf.com', 'http://localhost', 'http://127.0.0.1'])
 
 Image.MAX_IMAGE_PIXELS = None
 
