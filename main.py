@@ -1,0 +1,119 @@
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import NameObject, NumberObject
+from PIL import Image
+import io, os, tempfile
+
+app = Flask(__name__)
+CORS(app)
+
+Image.MAX_IMAGE_PIXELS = None
+
+QUALITY_SETTINGS = {
+    'low':    {'max_dim': 5000, 'jpeg_quality': 92},
+    'medium': {'max_dim': 4500, 'jpeg_quality': 85},
+    'high':   {'max_dim': 3000, 'jpeg_quality': 72},
+}
+
+@app.route('/')
+def index():
+    return jsonify({'status': 'SlimMyPDF API running'})
+
+@app.route('/compress', methods=['POST'])
+def compress():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    quality = request.form.get('quality', 'medium')
+
+    if file.filename == '' or not file.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Please upload a PDF file'}), 400
+
+    if quality not in QUALITY_SETTINGS:
+        quality = 'medium'
+
+    settings = QUALITY_SETTINGS[quality]
+    MAX_DIM = settings['max_dim']
+    JPEG_QUALITY = settings['jpeg_quality']
+
+    try:
+        pdf_bytes = file.read()
+        original_size = len(pdf_bytes)
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+
+        for page in reader.pages:
+            resources = page.get('/Resources', {})
+            xobj_dict = resources.get('/XObject', {})
+
+            for key in xobj_dict:
+                obj = xobj_dict[key]
+                if obj.get('/Subtype') == '/Image':
+                    try:
+                        w = int(obj['/Width'])
+                        h = int(obj['/Height'])
+                        raw = obj.get_data()
+
+                        try:
+                            img = Image.open(io.BytesIO(raw))
+                            img.load()
+                        except:
+                            cs = obj.get('/ColorSpace', '/DeviceRGB')
+                            mode = 'RGB' if cs == '/DeviceRGB' else 'L'
+                            img = Image.frombytes(mode, (w, h), raw)
+
+                        if max(img.width, img.height) > MAX_DIM:
+                            ratio = MAX_DIM / max(img.width, img.height)
+                            new_w = int(img.width * ratio)
+                            new_h = int(img.height * ratio)
+                            img = img.resize((new_w, new_h), Image.LANCZOS)
+
+                        buf = io.BytesIO()
+                        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=True)
+                        buf.seek(0)
+                        new_data = buf.read()
+
+                        obj._data = new_data
+                        obj[NameObject('/Filter')] = NameObject('/DCTDecode')
+                        obj[NameObject('/Width')] = NumberObject(img.width)
+                        obj[NameObject('/Height')] = NumberObject(img.height)
+                        obj[NameObject('/Length')] = NumberObject(len(new_data))
+                        obj[NameObject('/ColorSpace')] = NameObject('/DeviceRGB')
+                        obj[NameObject('/BitsPerComponent')] = NumberObject(8)
+                    except Exception:
+                        pass
+
+            writer.add_page(page)
+
+        writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+
+        out = io.BytesIO()
+        writer.write(out)
+        out.seek(0)
+        compressed_bytes = out.read()
+        compressed_size = len(compressed_bytes)
+
+        original_name = file.filename.replace('.pdf', '_slimmed.pdf')
+
+        out.seek(0)
+        return send_file(
+            io.BytesIO(compressed_bytes),
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=original_name,
+            headers={
+                'X-Original-Size': str(original_size),
+                'X-Compressed-Size': str(compressed_size),
+                'X-Savings-Percent': str(round((1 - compressed_size / original_size) * 100, 1))
+            }
+        )
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
