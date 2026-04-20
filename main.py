@@ -1,9 +1,9 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, make_response
 from flask_cors import CORS
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, NumberObject
 from PIL import Image
-import io, os, tempfile
+import io, os
 
 app = Flask(__name__)
 CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http://slimmypdf.com', 'http://localhost', 'http://127.0.0.1'])
@@ -95,19 +95,16 @@ def compress():
         compressed_size = len(compressed_bytes)
 
         original_name = file.filename.replace('.pdf', '_slimmed.pdf')
+        savings = round((1 - compressed_size / original_size) * 100, 1)
 
-        out.seek(0)
-        return send_file(
-            io.BytesIO(compressed_bytes),
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=original_name,
-            headers={
-                'X-Original-Size': str(original_size),
-                'X-Compressed-Size': str(compressed_size),
-                'X-Savings-Percent': str(round((1 - compressed_size / original_size) * 100, 1))
-            }
-        )
+        response = make_response(compressed_bytes)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename="{original_name}"'
+        response.headers['X-Original-Size'] = str(original_size)
+        response.headers['X-Compressed-Size'] = str(compressed_size)
+        response.headers['X-Savings-Percent'] = str(savings)
+        response.headers['Access-Control-Expose-Headers'] = 'X-Original-Size, X-Compressed-Size, X-Savings-Percent'
+        return response
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
