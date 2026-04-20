@@ -88,8 +88,6 @@ def compress():
 
             writer.add_page(page)
 
-        writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
-
         out = io.BytesIO()
         writer.write(out)
         out.seek(0)
