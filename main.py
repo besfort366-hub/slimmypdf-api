@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, jsonify, make_response
+from flask import Flask, request, make_response, jsonify
 from flask_cors import CORS
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, NumberObject
@@ -11,9 +11,9 @@ CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http:/
 Image.MAX_IMAGE_PIXELS = None
 
 QUALITY_SETTINGS = {
-    'low':    {'max_dim': 5000, 'jpeg_quality': 92},
-    'medium': {'max_dim': 4500, 'jpeg_quality': 85},
-    'high':   {'max_dim': 3000, 'jpeg_quality': 72},
+    'low':    {'max_dim': 5000, 'jpeg_quality': 88},
+    'medium': {'max_dim': 3500, 'jpeg_quality': 82},
+    'high':   {'max_dim': 2500, 'jpeg_quality': 70},
 }
 
 @app.route('/')
@@ -65,14 +65,15 @@ def compress():
                             mode = 'RGB' if cs == '/DeviceRGB' else 'L'
                             img = Image.frombytes(mode, (w, h), raw)
 
+                        # Always resize and recompress for speed
                         if max(img.width, img.height) > MAX_DIM:
                             ratio = MAX_DIM / max(img.width, img.height)
                             new_w = int(img.width * ratio)
                             new_h = int(img.height * ratio)
-                            img = img.resize((new_w, new_h), Image.LANCZOS)
+                            img = img.resize((new_w, new_h), Image.BILINEAR)  # BILINEAR is faster than LANCZOS
 
                         buf = io.BytesIO()
-                        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=True)
+                        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=False)  # optimize=False is faster
                         buf.seek(0)
                         new_data = buf.read()
 
