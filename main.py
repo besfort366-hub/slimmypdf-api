@@ -1,4 +1,4 @@
-from flask import Flask, request, make_response, jsonify
+from flask import Flask, request, make_response, jsonify, send_file
 from flask_cors import CORS
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, NumberObject
@@ -65,15 +65,14 @@ def compress():
                             mode = 'RGB' if cs == '/DeviceRGB' else 'L'
                             img = Image.frombytes(mode, (w, h), raw)
 
-                        # Always resize and recompress for speed
                         if max(img.width, img.height) > MAX_DIM:
                             ratio = MAX_DIM / max(img.width, img.height)
                             new_w = int(img.width * ratio)
                             new_h = int(img.height * ratio)
-                            img = img.resize((new_w, new_h), Image.BILINEAR)  # BILINEAR is faster than LANCZOS
+                            img = img.resize((new_w, new_h), Image.BILINEAR)
 
                         buf = io.BytesIO()
-                        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=False)  # optimize=False is faster
+                        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=False)
                         buf.seek(0)
                         new_data = buf.read()
 
@@ -109,6 +108,43 @@ def compress():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/merge', methods=['POST'])
+def merge():
+    files = request.files.getlist('files')
+
+    if not files or len(files) < 2:
+        return jsonify({'error': 'Please upload at least 2 PDF files.'}), 400
+
+    try:
+        writer = PdfWriter()
+        total_pages = 0
+
+        for f in files:
+            f.seek(0)
+            reader = PdfReader(f)
+            for page in reader.pages:
+                writer.add_page(page)
+            total_pages += len(reader.pages)
+
+        output = io.BytesIO()
+        writer.write(output)
+        output.seek(0)
+        merged_bytes = output.read()
+        merged_size = len(merged_bytes)
+
+        response = make_response(merged_bytes)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = 'attachment; filename="merged.pdf"'
+        response.headers['X-Merged-Size'] = str(merged_size)
+        response.headers['X-Page-Count'] = str(total_pages)
+        response.headers['Access-Control-Expose-Headers'] = 'X-Merged-Size, X-Page-Count'
+        return response
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
