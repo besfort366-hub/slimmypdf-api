@@ -1,9 +1,10 @@
-from flask import Flask, request, make_response, jsonify, send_file
+from flask import Flask, request, make_response, jsonify
 from flask_cors import CORS
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, NumberObject
 from PIL import Image
-import io, os, zipfile
+from pdf2docx import Converter
+import io, os, zipfile, tempfile
 
 app = Flask(__name__)
 CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http://slimmypdf.com', 'http://localhost', 'http://127.0.0.1'])
@@ -57,9 +58,7 @@ def compress():
                             img = Image.frombytes(mode, (w, h), raw)
                         if max(img.width, img.height) > MAX_DIM:
                             ratio = MAX_DIM / max(img.width, img.height)
-                            new_w = int(img.width * ratio)
-                            new_h = int(img.height * ratio)
-                            img = img.resize((new_w, new_h), Image.BILINEAR)
+                            img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.BILINEAR)
                         buf = io.BytesIO()
                         img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=False)
                         buf.seek(0)
@@ -79,11 +78,10 @@ def compress():
         out.seek(0)
         compressed_bytes = out.read()
         compressed_size = len(compressed_bytes)
-        original_name = file.filename.replace('.pdf', '_slimmed.pdf')
         savings = round((1 - compressed_size / original_size) * 100, 1)
         response = make_response(compressed_bytes)
         response.headers['Content-Type'] = 'application/pdf'
-        response.headers['Content-Disposition'] = f'attachment; filename="{original_name}"'
+        response.headers['Content-Disposition'] = f'attachment; filename="{file.filename.replace(".pdf", "_slimmed.pdf")}"'
         response.headers['X-Original-Size'] = str(original_size)
         response.headers['X-Compressed-Size'] = str(compressed_size)
         response.headers['X-Savings-Percent'] = str(savings)
@@ -111,11 +109,10 @@ def merge():
         writer.write(output)
         output.seek(0)
         merged_bytes = output.read()
-        merged_size = len(merged_bytes)
         response = make_response(merged_bytes)
         response.headers['Content-Type'] = 'application/pdf'
         response.headers['Content-Disposition'] = 'attachment; filename="merged.pdf"'
-        response.headers['X-Merged-Size'] = str(merged_size)
+        response.headers['X-Merged-Size'] = str(len(merged_bytes))
         response.headers['X-Page-Count'] = str(total_pages)
         response.headers['Access-Control-Expose-Headers'] = 'X-Merged-Size, X-Page-Count'
         return response
@@ -130,7 +127,7 @@ def split():
     file = request.files['file']
     mode = request.form.get('mode', 'all')
     pages_param = request.form.get('pages', '')
-    if file.filename == '' or not file.filename.lower().endswith('.pdf'):
+    if not file.filename.lower().endswith('.pdf'):
         return jsonify({'error': 'Please upload a PDF file'}), 400
     try:
         pdf_bytes = file.read()
@@ -143,9 +140,7 @@ def split():
                 part = part.strip()
                 if '-' in part:
                     start, end = part.split('-', 1)
-                    start = max(1, int(start.strip()))
-                    end = min(total, int(end.strip()))
-                    pages.update(range(start, end + 1))
+                    pages.update(range(max(1, int(start.strip())), min(total, int(end.strip())) + 1))
                 elif part.isdigit():
                     p = int(part)
                     if 1 <= p <= total:
@@ -174,12 +169,12 @@ def split():
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for i, page in enumerate(reader.pages):
-                    writer = PdfWriter()
-                    writer.add_page(page)
-                    page_buf = io.BytesIO()
-                    writer.write(page_buf)
-                    page_buf.seek(0)
-                    zf.writestr(f'page_{i + 1}.pdf', page_buf.read())
+                    w = PdfWriter()
+                    w.add_page(page)
+                    buf = io.BytesIO()
+                    w.write(buf)
+                    buf.seek(0)
+                    zf.writestr(f'page_{i + 1}.pdf', buf.read())
             zip_buffer.seek(0)
             result_bytes = zip_buffer.read()
             response = make_response(result_bytes)
@@ -189,6 +184,34 @@ def split():
             response.headers['X-Files-Created'] = str(total_pages)
             response.headers['Access-Control-Expose-Headers'] = 'X-Pages-Extracted, X-Files-Created'
             return response
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/pdf-to-word', methods=['POST'])
+def pdf_to_word():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    file = request.files['file']
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Please upload a PDF file'}), 400
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = os.path.join(tmpdir, 'input.pdf')
+            docx_path = os.path.join(tmpdir, 'output.docx')
+            file.save(pdf_path)
+            cv = Converter(pdf_path)
+            cv.convert(docx_path, start=0, end=None)
+            cv.close()
+            with open(docx_path, 'rb') as f:
+                docx_bytes = f.read()
+        output_name = file.filename.replace('.pdf', '.docx').replace('.PDF', '.docx')
+        response = make_response(docx_bytes)
+        response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        response.headers['Content-Disposition'] = f'attachment; filename="{output_name}"'
+        response.headers['X-Output-Size'] = str(len(docx_bytes))
+        response.headers['Access-Control-Expose-Headers'] = 'X-Output-Size'
+        return response
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
