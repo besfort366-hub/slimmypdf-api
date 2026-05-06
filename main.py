@@ -4,7 +4,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, NumberObject
 from PIL import Image
 from pdf2docx import Converter
-import io, os, zipfile, tempfile
+import io, os, zipfile, tempfile, gc
 
 app = Flask(__name__)
 CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http://slimmypdf.com', 'http://localhost', 'http://127.0.0.1'])
@@ -12,14 +12,68 @@ CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http:/
 Image.MAX_IMAGE_PIXELS = None
 
 QUALITY_SETTINGS = {
-    'low':    {'max_dim': 5000, 'jpeg_quality': 88},
-    'medium': {'max_dim': 3500, 'jpeg_quality': 82},
-    'high':   {'max_dim': 2500, 'jpeg_quality': 70},
+    'low':    {'max_dim': 2000, 'jpeg_quality': 85},
+    'medium': {'max_dim': 1500, 'jpeg_quality': 75},
+    'high':   {'max_dim': 1000, 'jpeg_quality': 60},
 }
+
+def compress_image_obj(obj, MAX_DIM, JPEG_QUALITY):
+    """Compress a single image XObject in memory-efficient way."""
+    try:
+        w = int(obj['/Width'])
+        h = int(obj['/Height'])
+
+        # Skip tiny images — not worth processing
+        if w < 100 and h < 100:
+            return
+
+        raw = obj.get_data()
+
+        try:
+            img = Image.open(io.BytesIO(raw))
+            img.load()
+        except Exception:
+            cs = obj.get('/ColorSpace', '/DeviceRGB')
+            mode = 'RGB' if cs == '/DeviceRGB' else 'L'
+            try:
+                img = Image.frombytes(mode, (w, h), raw)
+            except Exception:
+                return
+
+        # Resize if over max dimension
+        if max(img.width, img.height) > MAX_DIM:
+            ratio = MAX_DIM / max(img.width, img.height)
+            new_w = max(1, int(img.width * ratio))
+            new_h = max(1, int(img.height * ratio))
+            img = img.resize((new_w, new_h), Image.BILINEAR)
+
+        # Convert and compress
+        buf = io.BytesIO()
+        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=False)
+        buf.seek(0)
+        new_data = buf.read()
+
+        # Only replace if actually smaller
+        if len(new_data) < len(raw):
+            obj._data = new_data
+            obj[NameObject('/Filter')] = NameObject('/DCTDecode')
+            obj[NameObject('/Width')] = NumberObject(img.width)
+            obj[NameObject('/Height')] = NumberObject(img.height)
+            obj[NameObject('/Length')] = NumberObject(len(new_data))
+            obj[NameObject('/ColorSpace')] = NameObject('/DeviceRGB')
+            obj[NameObject('/BitsPerComponent')] = NumberObject(8)
+
+        # Free memory immediately
+        del img, raw, buf, new_data
+
+    except Exception:
+        pass
+
 
 @app.route('/')
 def index():
     return jsonify({'status': 'SlimMyPDF API running'})
+
 
 @app.route('/compress', methods=['POST'])
 def compress():
@@ -31,54 +85,57 @@ def compress():
         return jsonify({'error': 'Please upload a PDF file'}), 400
     if quality not in QUALITY_SETTINGS:
         quality = 'medium'
+
     settings = QUALITY_SETTINGS[quality]
     MAX_DIM = settings['max_dim']
     JPEG_QUALITY = settings['jpeg_quality']
+
     try:
         pdf_bytes = file.read()
         original_size = len(pdf_bytes)
+
         reader = PdfReader(io.BytesIO(pdf_bytes))
         writer = PdfWriter()
-        for page in reader.pages:
+
+        # Track processed objects to avoid processing shared images twice
+        processed_refs = set()
+
+        for page_num, page in enumerate(reader.pages):
             resources = page.get('/Resources', {})
             xobj_dict = resources.get('/XObject', {})
+
             for key in xobj_dict:
                 obj = xobj_dict[key]
-                if obj.get('/Subtype') == '/Image':
-                    try:
-                        w = int(obj['/Width'])
-                        h = int(obj['/Height'])
-                        raw = obj.get_data()
-                        try:
-                            img = Image.open(io.BytesIO(raw))
-                            img.load()
-                        except:
-                            cs = obj.get('/ColorSpace', '/DeviceRGB')
-                            mode = 'RGB' if cs == '/DeviceRGB' else 'L'
-                            img = Image.frombytes(mode, (w, h), raw)
-                        if max(img.width, img.height) > MAX_DIM:
-                            ratio = MAX_DIM / max(img.width, img.height)
-                            img = img.resize((int(img.width * ratio), int(img.height * ratio)), Image.BILINEAR)
-                        buf = io.BytesIO()
-                        img.convert('RGB').save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=False)
-                        buf.seek(0)
-                        new_data = buf.read()
-                        obj._data = new_data
-                        obj[NameObject('/Filter')] = NameObject('/DCTDecode')
-                        obj[NameObject('/Width')] = NumberObject(img.width)
-                        obj[NameObject('/Height')] = NumberObject(img.height)
-                        obj[NameObject('/Length')] = NumberObject(len(new_data))
-                        obj[NameObject('/ColorSpace')] = NameObject('/DeviceRGB')
-                        obj[NameObject('/BitsPerComponent')] = NumberObject(8)
-                    except Exception:
-                        pass
+
+                # Skip non-image objects
+                if obj.get('/Subtype') != '/Image':
+                    continue
+
+                # Skip already processed shared objects
+                obj_id = id(obj)
+                if obj_id in processed_refs:
+                    continue
+                processed_refs.add(obj_id)
+
+                compress_image_obj(obj, MAX_DIM, JPEG_QUALITY)
+
             writer.add_page(page)
+
+            # Force garbage collection every 10 pages on large files
+            if page_num % 10 == 0:
+                gc.collect()
+
         out = io.BytesIO()
         writer.write(out)
         out.seek(0)
         compressed_bytes = out.read()
         compressed_size = len(compressed_bytes)
         savings = round((1 - compressed_size / original_size) * 100, 1)
+
+        # Clean up
+        del pdf_bytes, reader, writer
+        gc.collect()
+
         response = make_response(compressed_bytes)
         response.headers['Content-Type'] = 'application/pdf'
         response.headers['Content-Disposition'] = f'attachment; filename="{file.filename.replace(".pdf", "_slimmed.pdf")}"'
@@ -87,7 +144,9 @@ def compress():
         response.headers['X-Savings-Percent'] = str(savings)
         response.headers['Access-Control-Expose-Headers'] = 'X-Original-Size, X-Compressed-Size, X-Savings-Percent'
         return response
+
     except Exception as e:
+        gc.collect()
         return jsonify({'error': str(e)}), 500
 
 
