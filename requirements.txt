@@ -1,6 +1,8 @@
 flask
 flask-cors
+flask-limiter
 pypdf
 Pillow
-gunicorn
 pdf2docx
+gunicorn
+ 
