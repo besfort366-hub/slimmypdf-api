@@ -1,5 +1,7 @@
 from flask import Flask, request, make_response, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, NumberObject
 from PIL import Image
@@ -8,6 +10,16 @@ import io, os, zipfile, tempfile, gc
 
 app = Flask(__name__)
 CORS(app, origins=['https://slimmypdf.com', 'https://www.slimmypdf.com', 'http://slimmypdf.com', 'http://localhost', 'http://127.0.0.1'])
+
+# ── RATE LIMITER ──
+# Max 10 requests per minute per IP across all endpoints
+# Max 100 requests per hour per IP
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["100 per hour", "10 per minute"],
+    storage_uri="memory://",
+)
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -76,6 +88,7 @@ def index():
 
 
 @app.route('/compress', methods=['POST'])
+@limiter.limit("5 per minute")  # stricter limit for heavy endpoint
 def compress():
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -151,6 +164,7 @@ def compress():
 
 
 @app.route('/merge', methods=['POST'])
+@limiter.limit("5 per minute")
 def merge():
     files = request.files.getlist('files')
     if not files or len(files) < 2:
@@ -180,6 +194,7 @@ def merge():
 
 
 @app.route('/split', methods=['POST'])
+@limiter.limit("5 per minute")
 def split():
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -248,6 +263,7 @@ def split():
 
 
 @app.route('/pdf-to-word', methods=['POST'])
+@limiter.limit("3 per minute")  # strictest — most resource intensive
 def pdf_to_word():
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -273,6 +289,12 @@ def pdf_to_word():
         return response
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ── RATE LIMIT ERROR HANDLER ──
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({'error': 'Too many requests. Please wait a moment and try again.'}), 429
 
 
 if __name__ == '__main__':
